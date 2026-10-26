@@ -1,6 +1,6 @@
 # TaskFlow
 
-A small, complete task manager built with React + Vite, Express, and MySQL 8. Create, edit, delete, search, and filter tasks, and switch them between pending and completed. Tasks are stored in MySQL and survive application restarts.
+A small, complete task manager built with React + Vite, Express, and MySQL 8. Create, edit, delete, search, and filter tasks, and switch them between pending and completed. Tasks are stored in MySQL and survive application restarts. The project can be run locally or containerized with Docker and Docker Compose.
 
 ## Project layout
 
@@ -17,6 +17,7 @@ taskflow/
 │   │   ├── styles.css
 │   │   └── TaskDialog.jsx
 │   ├── .env.example
+│   ├── Dockerfile
 │   ├── index.html
 │   ├── package.json
 │   ├── package-lock.json
@@ -32,13 +33,118 @@ taskflow/
 │   │   ├── api.test.js
 │   │   └── mysql.test.js
 │   ├── .env.example
+│   ├── Dockerfile
 │   ├── package.json
 │   └── package-lock.json
 ├── database/
 │   └── init.sql
+├── docker-compose.yaml
 ├── .gitignore
 └── README.md
 ```
+
+## Run with Docker Compose
+
+This is the containerized deployment of TaskFlow. It uses three services:
+
+```text
+Browser (http://localhost:8080)
+  |  loads React static files
+  v
+Frontend: Nginx (container port 80)
+
+Browser (JavaScript fetch to http://localhost:3000)
+  |  REST API requests
+  v
+Backend: Node.js / Express (container port 3000)
+  |  DB_HOST=db, DB_PORT=3306
+  v
+Database: MySQL 8 (container port 3306)
+  |  persistent storage
+  v
+Docker named volume (db-data)
+```
+
+The frontend and backend use separate Dockerfiles. Docker Compose builds and runs the services, provides an internal network, and mounts a named volume for MySQL persistence. The React bundle runs **in the browser**, so its API URL must be reachable from the browser—not merely resolvable inside Docker.
+
+### Prerequisites
+
+- Docker Desktop (or Docker Engine with the Compose plugin) running.
+- Available host ports **8080** (frontend) and **3000** (API).
+- The `docker-compose.yaml`, both Dockerfiles, and `database/init.sql` present in the repository.
+
+You do **not** need to install Node.js or MySQL locally for the Docker-based workflow.
+
+### Configuration before starting
+
+Check the service names and environment variables in `docker-compose.yaml`:
+
+| Setting | Expected value / meaning |
+| --- | --- |
+| `DB_HOST` | `db` (the MySQL Compose service name, not `127.0.0.1`) |
+| `DB_PORT` | `3306` (MySQL's internal port) |
+| `DB_NAME` | `taskflow` (created by `database/init.sql`) |
+| `DB_USER` / `DB_PASSWORD` | A MySQL account and matching credentials |
+| `MYSQL_ROOT_PASSWORD` | Password for the MySQL root account (development only) |
+| `VITE_API_URL` | `http://localhost:3000` for a browser on the same computer |
+
+**Important:** `MYSQL_ROOT_PASSWORD` alone does not create a separate `taskflow_user`. Either create and grant permissions to an application user in your MySQL initialization/setup, or use credentials for an account that actually exists. The original local setup below creates `taskflow_user` for `'localhost'`; a container-to-container connection requires an account allowed to connect from the backend container. Prefer a dedicated least-privilege user instead of root for non-demo environments.
+
+Keep actual passwords and tokens out of Git. Use local, Git-ignored environment files or an appropriate secret manager; never commit production credentials. If your Compose file currently contains a literal demo password, replace it before publishing the repository.
+
+**Frontend build-time setting:** Vite embeds `VITE_API_URL` in the built JavaScript. Set it **before the frontend build** (for example, using a Dockerfile build argument wired through Compose). Setting `VITE_API_URL` only as a runtime environment variable on the Nginx container does not update an already-built React bundle. If your frontend Dockerfile uses the default `http://localhost:3000`, that default works for this local example.
+
+### Start the application
+
+From the project root:
+
+```sh
+docker compose config
+docker compose up -d --build
+```
+
+`config` validates the Compose configuration; `up -d --build` builds the application images and starts the services in the background. After MySQL initialization completes, open:
+
+| Component | URL |
+| --- | --- |
+| TaskFlow frontend | http://localhost:8080 |
+| API health | http://localhost:3000/health |
+| API/database readiness | http://localhost:3000/ready |
+| Task API | http://localhost:3000/api/tasks |
+
+On a successful setup, `/ready` returns `{"status":"ready","database":"connected"}`. Then create a task in the frontend and refresh the page to confirm persistence.
+
+### Logs, lifecycle, and persistence
+
+```sh
+docker compose ps
+docker compose logs -f backend
+docker compose logs -f db
+docker compose down
+```
+
+`docker compose down` stops and removes the Compose containers and network, **but retains named volumes** by default. To start the same project again, run `docker compose up -d`.
+
+The database mount `db-data:/var/lib/mysql` persists MySQL files between container recreations. The SQL script mount `./database/init.sql:/docker-entrypoint-initdb.d/init.sql:ro` initializes a **new, empty** MySQL data directory. It is **not** automatically rerun when an existing database volume is reused.
+
+> **Data loss warning:** `docker compose down -v` also removes Compose-managed named volumes, including the database volume. Use it only when you intentionally want to reset the database and lose its stored tasks.
+
+For local development, the backend may also use `./backend:/app` plus `/app/node_modules`: the first is a bind mount for live source files; the second keeps Linux Node.js dependencies separate from any host `node_modules`. These mounts are optional development conveniences, not database storage.
+
+### Docker troubleshooting
+
+- **Frontend loads but tasks fail:** inspect the browser DevTools Network tab, `docker compose logs backend`, and `/ready`. Check `VITE_API_URL`, `DB_NAME`, and database permissions.
+- **`/ready` works but `/api/tasks` fails:** connectivity is working, but the `tasks` table or user permissions may be missing. Confirm that `init.sql` initialized the intended database.
+- **Database is not ready at startup:** `depends_on` with the short syntax controls startup order, not readiness. Use a database healthcheck with `condition: service_healthy` or application retry logic if necessary.
+- **Frontend displays the default Nginx page or missing files:** verify that the frontend Dockerfile copies the Vite build output into `/usr/share/nginx/html`. Avoid a bind mount such as `./dist:/usr/share/nginx/html` unless that host directory actually contains the built files; it can hide files copied into the image.
+- **MySQL exits with an invalid downgrade error:** a persistent volume created by a newer MySQL major version cannot simply be opened by an older one. Use a compatible version or perform a supported migration; do not delete a volume containing important data.
+- **Host port already allocated:** stop the conflicting process/container or change the **host-side** port mapping. Internal container-to-container MySQL connections still use `db:3306`.
+
+---
+
+## Run without Docker (manual development setup)
+
+The following instructions describe the original local development workflow. They require local Node.js and MySQL installations and do not use the Docker Compose services above.
 
 ## Requirements
 
