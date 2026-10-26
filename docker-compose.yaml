@@ -1,0 +1,53 @@
+services:
+  frontend:
+    build:
+      context: ./frontend
+    ports:
+      - 8080:80
+    volumes:
+      - ./frontend/dist:/usr/share/nginx/html
+    depends_on:
+      - backend
+    networks:
+      - my-network
+
+  backend:
+    build:
+      context: ./backend
+    ports:
+      - 3000:3000
+    volumes:
+      - ./backend:/app
+      - /app/node_modules
+    networks:
+      - my-network
+    command: ["npm","start"]
+    environment:
+      DB_HOST: "db"
+      DB_USER: "taskflow_user"
+      DB_PASSWORD: "123456"
+      DB_NAME: "taskflow"
+      DB_PORT: 3306
+    depends_on:
+      - db
+
+  db:
+    image: mysql:8
+    environment:
+      MYSQL_ROOT_PASSWORD: 123456
+      MYSQL_DATABASE: taskflow
+      MYSQL_USER: taskflow_user
+      MYSQL_PASSWORD: 123456      
+    ports:
+      - 3306:3306
+    volumes:
+      - ./database/init.sql:/docker-entrypoint-initdb.d/init.sql:ro 
+      - db-data:/var/lib/mysql
+    networks:
+      - my-network  
+
+volumes:
+  db-data:    
+
+networks:
+  my-network:
